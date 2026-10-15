@@ -1,0 +1,5 @@
+{
+    "threshold": 0.85,
+    "use_ordinal": true,
+    "input_dim": 1280
+}
