@@ -17,6 +17,7 @@ import torch
 torch.set_num_threads(1)
 from pydantic import BaseModel, Field
 from fastapi import FastAPI, HTTPException, Request, status
+from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from predict import FloodDamagePipeline
 
@@ -173,7 +174,16 @@ def format_model_result(result: dict) -> dict:
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
-@app.get("/")
+HTML_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "index.html")
+
+@app.get("/", response_class=HTMLResponse)
+def index_page():
+    if os.path.exists(HTML_PATH):
+        with open(HTML_PATH, "r", encoding="utf-8") as f:
+            return HTMLResponse(content=f.read())
+    return HTMLResponse("<h1>ResQFlow Flood Severity Assessment API</h1>")
+
+
 @app.get("/health")
 @app.get("/api/health")
 def health():
