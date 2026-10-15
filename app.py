@@ -15,6 +15,7 @@ import tempfile
 from typing import List, Optional
 import torch
 torch.set_num_threads(1)
+from PIL import Image
 from pydantic import BaseModel, Field
 from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.responses import HTMLResponse
@@ -47,7 +48,7 @@ app.add_middleware(
 
 
 # ---------------------------------------------------------------------------
-# Java / Spring Boot Matching DTOs
+# Java / Spring Boot Matching DTOs (Strict 0 for non-flood, 0-100 for flood)
 # ---------------------------------------------------------------------------
 class FloodScoreRequestDTO(BaseModel):
     image_base64: str = Field(
@@ -57,9 +58,10 @@ class FloodScoreRequestDTO(BaseModel):
 
 
 class FloodScoreResponseDTO(BaseModel):
-    severity_score: int = Field(..., description="Integer severity score out of 10 (1-10)")
-    severity_level: str = Field(..., description="LOW, MODERATE, HIGH, EXTREME")
-    rescue_priority: str = Field(..., description="LOW, MEDIUM, HIGH, CRITICAL")
+    damage_score: int = Field(0, description="Damage severity score 0-100 (strict 0 for non-flooded)")
+    severity_score: int = Field(0, description="Damage severity score 0-100 (strict 0 for non-flooded)")
+    severity_level: str = Field(..., description="NOT_FLOOD, VERY_LOW, LOW, MODERATE, HIGH, VERY_HIGH, CRITICAL")
+    rescue_priority: str = Field(..., description="NONE, LOW, MEDIUM, HIGH, CRITICAL")
     confidence: float = Field(..., description="Confidence between 0.0 and 1.0")
     title: str = Field(..., description="Incident headline")
     description: str = Field(..., description="Assessment details")
@@ -67,32 +69,33 @@ class FloodScoreResponseDTO(BaseModel):
     estimated_depth: str = Field(..., description="Depth range e.g. '0 cm (Dry Surface)'")
     road_access: str = Field(..., description="CLEAR, PASSABLE_CAUTION, IMPASSABLE, COMPLETELY_BLOCKED")
     recommendations: List[str] = Field(..., description="Safety and triage recommendations")
-    flood_detected: Optional[bool] = Field(None, description="Binary flood flag from Stage 1 gate")
-    flood_probability: Optional[float] = Field(None, description="Raw model probability")
-    damage_score_100: Optional[int] = Field(None, description="Damage severity score 0-100")
+    flood_detected: bool = Field(False, description="Binary flood flag from Stage 1 gate")
+    flood_probability: float = Field(0.0, description="Raw model probability (0.0 for non-flooded)")
+    damage_score_100: int = Field(0, description="Damage severity score 0-100 (strict 0 for non-flooded)")
 
     class Config:
         populate_by_name = True
 
 
 def format_model_result(result: dict) -> dict:
-    flood_detected = result.get("flood_detected", False)
+    flood_detected = bool(result.get("flood_detected", False))
     prob = float(result.get("flood_probability", 0.0))
     raw_score = int(result.get("damage_score", 0))
     reason = result.get("reason", "")
     
-    if not flood_detected:
+    if not flood_detected or raw_score == 0:
         is_doc = "document" in reason.lower() or "text" in reason.lower()
         title = "Non-Hazard: Document / Text Detected" if is_doc else "Normal Condition: No Flood Inundation Detected"
         what_is_in_image = "Document / printed paper; no flood inundation detected." if is_doc else "Dry surface; no standing water, road submersion, or structural flooding."
         
         return {
-            "severity_score": 1,
-            "severity_level": "LOW",
-            "rescue_priority": "LOW",
+            "damage_score": 0,
+            "severity_score": 0,
+            "severity_level": "NOT_FLOOD",
+            "rescue_priority": "NONE",
             "confidence": float(round(1.0 - prob if prob < 0.5 else 0.99, 4)),
             "title": title,
-            "description": reason,
+            "description": reason if reason else "Safe: No flood inundation detected.",
             "what_is_in_image": what_is_in_image,
             "estimated_depth": "0 cm (Dry Surface)",
             "road_access": "CLEAR",
@@ -102,25 +105,34 @@ def format_model_result(result: dict) -> dict:
                 "Routine monitoring continues."
             ],
             "flood_detected": False,
-            "flood_probability": prob,
+            "flood_probability": 0.0,
             "damage_score_100": 0
         }
     else:
-        # Scale 1-100 to 1-10
-        severity_10 = max(2, min(10, int(round(raw_score / 10.0))))
-        
-        if raw_score <= 30:
-            level = "LOW"
+        score = max(1, min(100, raw_score))
+        if score <= 20:
+            level = "VERY_LOW"
             priority = "LOW"
-            depth = "10 - 25 cm (Ankle Deep)"
-            access = "PASSABLE_CAUTION"
+            depth = "5 - 15 cm (Curbside Puddles)"
+            access = "CLEAR"
             what = "Shallow water accumulation, surface runoff, or curbside puddles."
             recs = [
-                "Proceed with caution on low-lying roads.",
+                "Roads are safe for transit. Drive with standard caution.",
                 "Monitor local rainfall alerts.",
-                "Avoid parking near storm drains."
+                "Ensure local street drains are unblocked."
             ]
-        elif raw_score <= 60:
+        elif score <= 40:
+            level = "LOW"
+            priority = "LOW"
+            depth = "15 - 30 cm (Ankle Deep)"
+            access = "PASSABLE_CAUTION"
+            what = "Shallow road flooding; water pooling along streets and curbs."
+            recs = [
+                "Proceed with caution on low-lying roads.",
+                "Avoid parking near storm drains.",
+                "Small passenger vehicles should slow down."
+            ]
+        elif score <= 60:
             level = "MODERATE"
             priority = "MEDIUM"
             depth = "30 - 65 cm (Knee to Wheel Height)"
@@ -131,7 +143,7 @@ def format_model_result(result: dict) -> dict:
                 "Elevate electrical appliances and critical documents.",
                 "Prepare household emergency evacuation kits."
             ]
-        elif raw_score <= 80:
+        elif score <= 80:
             level = "HIGH"
             priority = "HIGH"
             depth = "70 - 130 cm (Waist to Lower-Door Height)"
@@ -142,10 +154,21 @@ def format_model_result(result: dict) -> dict:
                 "Evacuate ground-floor occupants to higher stories or relief shelters.",
                 "Disconnect local electricity grid sections in affected streets."
             ]
-        else:
-            level = "EXTREME"
+        elif score <= 95:
+            level = "VERY_HIGH"
             priority = "CRITICAL"
-            depth = "> 150 cm (Chest Deep to Roof Inundation)"
+            depth = "130 - 180 cm (Chest Deep Water)"
+            access = "IMPASSABLE"
+            what = "Severe street and residential inundation; vehicles floating or deeply submerged."
+            recs = [
+                "Deploy emergency rescue boats and dinghies immediately.",
+                "Evacuate vulnerable individuals and elderly immediately.",
+                "Secure emergency shelter locations."
+            ]
+        else:
+            level = "CRITICAL"
+            priority = "CRITICAL"
+            depth = "> 180 cm (Chest Deep to Roof Inundation)"
             access = "COMPLETELY_BLOCKED"
             what = "Severe catastrophic flooding, deep fast-flowing water, structural submersion."
             recs = [
@@ -155,19 +178,20 @@ def format_model_result(result: dict) -> dict:
             ]
             
         return {
-            "severity_score": severity_10,
+            "damage_score": score,
+            "severity_score": score,
             "severity_level": level,
             "rescue_priority": priority,
             "confidence": float(round(prob, 4)),
-            "title": f"Flood Warning: {level} Severity Inundation (Score {severity_10}/10)",
-            "description": reason,
+            "title": f"Flood Warning: {level} Severity Inundation (Score {score}/100)",
+            "description": reason if reason else f"Inundation detected with damage score {score}/100.",
             "what_is_in_image": what,
             "estimated_depth": depth,
             "road_access": access,
             "recommendations": recs,
             "flood_detected": True,
             "flood_probability": prob,
-            "damage_score_100": raw_score
+            "damage_score_100": score
         }
 
 
@@ -204,9 +228,10 @@ def score_flood_image(request: FloodScoreRequestDTO):
     raw_b64 = request.image_base64
     if not raw_b64 or not raw_b64.strip():
         fallback = {
-            "severity_score": 1,
-            "severity_level": "LOW",
-            "rescue_priority": "LOW",
+            "damage_score": 0,
+            "severity_score": 0,
+            "severity_level": "NOT_FLOOD",
+            "rescue_priority": "NONE",
             "confidence": 0.0,
             "title": "Empty Image Payload",
             "description": "No valid image data was attached to the assessment request.",
@@ -225,12 +250,18 @@ def score_flood_image(request: FloodScoreRequestDTO):
 
     try:
         img_bytes = base64.b64decode(raw_b64)
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp:
-            tmp.write(img_bytes)
-            tmp_path = tmp.name
+        # Open with PIL and resize large images to save RAM on free-tier containers
+        with Image.open(io.BytesIO(img_bytes)) as pil_img:
+            pil_img = pil_img.convert("RGB")
+            if pil_img.width > 1024 or pil_img.height > 1024:
+                pil_img.thumbnail((1024, 1024))
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp:
+                pil_img.save(tmp.name, format="JPEG", quality=85)
+                tmp_path = tmp.name
 
         result = get_pipeline().predict(tmp_path)
-        os.remove(tmp_path)
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
 
         dto = format_model_result(result)
         return FloodScoreResponseDTO(**dto)

@@ -73,8 +73,11 @@ def check_document_or_non_scene(image):
     Tier 1 Domain & Document Gating:
     Detects if an image is a printed/scanned document, application letter,
     text sheet, or non-natural graphic with low saturation and high paper luminance.
+    Uses memory-efficient thumbnailing to prevent OOM on large device photos.
     """
-    rgb = np.array(image, dtype=float)
+    thumb = image.copy()
+    thumb.thumbnail((400, 400))
+    rgb = np.array(thumb, dtype=np.float32)
     if rgb.ndim != 3 or rgb.shape[2] < 3:
         return True, "Grayscale or single-channel document detected. Non-flood incident."
         
@@ -151,6 +154,9 @@ class FloodDamagePipeline:
             raise FileNotFoundError(f"Image not found at {image_path}")
             
         image = Image.open(image_path).convert('RGB')
+        # Immediately downsample excessive image dimensions to protect RAM
+        if image.width > 1024 or image.height > 1024:
+            image.thumbnail((1024, 1024))
         
         # Tier 1: Visual Domain & Document Gating
         is_doc, doc_reason = check_document_or_non_scene(image)
@@ -177,7 +183,7 @@ class FloodDamagePipeline:
                 reason = "Safe: No reliable visual evidence of flooding or flood aftermath." if prob < 0.1 else "No reliable visual evidence of flooding or flood aftermath."
                 return {
                     "flood_detected": False,
-                    "flood_probability": float(prob),
+                    "flood_probability": 0.0,
                     "damage_score": 0,
                     "severity": "NOT_FLOOD",
                     "reason": reason
