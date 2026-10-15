@@ -5,17 +5,28 @@ Directly interfaces with Spring Boot VictimService via /api/v1/score-base64.
 """
 
 import os
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
+os.environ["NUMEXPR_NUM_THREADS"] = "1"
 import io
 import base64
 import tempfile
 from typing import List, Optional
+import torch
+torch.set_num_threads(1)
 from pydantic import BaseModel, Field
 from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from predict import FloodDamagePipeline
 
-# Load ML Pipeline on startup
-pipeline = FloodDamagePipeline()
+pipeline = None
+
+def get_pipeline():
+    global pipeline
+    if pipeline is None:
+        pipeline = FloodDamagePipeline()
+    return pipeline
 
 app = FastAPI(
     title="ResQFlow ML Flood Severity Analyzer",
@@ -208,7 +219,7 @@ def score_flood_image(request: FloodScoreRequestDTO):
             tmp.write(img_bytes)
             tmp_path = tmp.name
 
-        result = pipeline.predict(tmp_path)
+        result = get_pipeline().predict(tmp_path)
         os.remove(tmp_path)
 
         dto = format_model_result(result)
